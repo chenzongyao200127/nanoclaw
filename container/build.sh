@@ -13,7 +13,11 @@ CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 echo "Building NanoClaw agent container image..."
 echo "Image: ${IMAGE_NAME}:${TAG}"
 
-${CONTAINER_RUNTIME} build -t "${IMAGE_NAME}:${TAG}" .
+BUILD_OPTS=""
+if [ "${CONTAINER_RUNTIME}" = "docker" ]; then
+  BUILD_OPTS="--network=host"
+fi
+${CONTAINER_RUNTIME} build ${BUILD_OPTS} -t "${IMAGE_NAME}:${TAG}" .
 
 echo ""
 echo "Build complete!"

@@ -3,6 +3,9 @@
 
 FROM node:22-slim
 
+# Force IPv4 for apt (IPv6 may be unreachable in some environments)
+RUN echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
+
 # Install system dependencies for Chromium
 RUN apt-get update && apt-get install -y \
     chromium \

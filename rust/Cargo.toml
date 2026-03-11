@@ -1,0 +1,16 @@
+[workspace]
+members = [
+  "crates/nanoclaw-core",
+  "crates/nanoclaw-db",
+  "crates/nanoclaw-runtime",
+  "apps/nanoclaw-host",
+  "apps/nanoclaw-setup",
+  "apps/nanoclaw-runner",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+

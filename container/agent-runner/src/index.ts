@@ -19,6 +19,8 @@ import path from 'path';
 import { query, HookCallback, PreCompactHookInput } from '@anthropic-ai/claude-agent-sdk';
 import { fileURLToPath } from 'url';
 
+import { ContextualTaintTracker } from './taint-tracker.js';
+
 interface ContainerInput {
   prompt: string;
   sessionId?: string;
@@ -115,6 +117,113 @@ function writeOutput(output: ContainerOutput): void {
 
 function log(message: string): void {
   console.error(`[agent-runner] ${message}`);
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function getToolName(input: unknown): string | undefined {
+  const record = asRecord(input);
+  if (!record) return undefined;
+
+  const candidates = [
+    record.tool_name,
+    record.toolName,
+    record.name,
+  ];
+
+  return candidates.find((value): value is string => typeof value === 'string');
+}
+
+function getBashCommand(input: unknown): string | undefined {
+  const record = asRecord(input);
+  if (!record) return undefined;
+
+  const direct = [record.command, record.cmd].find(
+    (value): value is string => typeof value === 'string',
+  );
+  if (direct) return direct;
+
+  const nestedCandidates = [
+    record.tool_input,
+    record.toolInput,
+    record.input,
+    record.args,
+    record.arguments,
+  ];
+
+  for (const candidate of nestedCandidates) {
+    const nested = asRecord(candidate);
+    if (!nested) continue;
+    const command = [nested.command, nested.cmd].find(
+      (value): value is string => typeof value === 'string',
+    );
+    if (command) return command;
+  }
+
+  return undefined;
+}
+
+function getToolOutput(input: unknown): unknown {
+  const record = asRecord(input);
+  if (!record) return undefined;
+
+  for (const key of [
+    'tool_response',
+    'toolResponse',
+    'tool_result',
+    'toolResult',
+    'result',
+    'output',
+    'response',
+  ]) {
+    if (key in record) {
+      return record[key];
+    }
+  }
+
+  return undefined;
+}
+
+function createPreToolUseHook(tracker: ContextualTaintTracker): HookCallback {
+  return async (input) => {
+    const toolName = getToolName(input);
+    if (toolName !== 'Bash') return {};
+
+    const command = getBashCommand(input);
+    if (!command) return {};
+
+    const decision = tracker.inspectBashCommand(command);
+    if (!decision) return {};
+
+    const matched = decision.matches
+      .map((match) => `"${match.fragment.slice(0, 60)}" from ${match.source}`)
+      .join(', ');
+    log(`Blocked tainted Bash command: ${matched}`);
+
+    return {
+      decision: 'block',
+      reason: `${decision.reason} Matches: ${matched}`,
+    };
+  };
+}
+
+function createPostToolUseHook(tracker: ContextualTaintTracker): HookCallback {
+  return async (input) => {
+    const toolName = getToolName(input);
+    if (!toolName) return {};
+
+    const added = tracker.taintToolOutput(toolName, getToolOutput(input));
+    if (added > 0) {
+      log(`Tainted ${added} fragment(s) from ${toolName}`);
+    }
+
+    return {};
+  };
 }
 
 function getSessionSummary(sessionId: string, transcriptPath: string): string | null {
@@ -335,6 +444,7 @@ async function runQuery(
   mcpServerPath: string,
   containerInput: ContainerInput,
   sdkEnv: Record<string, string | undefined>,
+  taintTracker: ContextualTaintTracker,
   resumeAt?: string,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
   const stream = new MessageStream();
@@ -355,6 +465,7 @@ async function runQuery(
     const messages = drainIpcInput();
     for (const text of messages) {
       log(`Piping IPC message into active query (${text.length} chars)`);
+      taintTracker.taintText(text, 'ipc_message');
       stream.push(text);
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
@@ -426,8 +537,10 @@ async function runQuery(
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],
+        PreToolUse: [{ hooks: [createPreToolUseHook(taintTracker)] }],
+        PostToolUse: [{ hooks: [createPostToolUseHook(taintTracker)] }],
       },
-    }
+    } as any,
   })) {
     messageCount++;
     const msgType = message.type === 'system' ? `system/${(message as { subtype?: string }).subtype}` : message.type;
@@ -499,9 +612,14 @@ async function main(): Promise<void> {
   if (containerInput.isScheduledTask) {
     prompt = `[SCHEDULED TASK - The following message was sent automatically and is not coming directly from the user or group.]\n\n${prompt}`;
   }
+  const taintTracker = new ContextualTaintTracker();
+  taintTracker.taintText(prompt, 'user_prompt');
   const pending = drainIpcInput();
   if (pending.length > 0) {
     log(`Draining ${pending.length} pending IPC messages into initial prompt`);
+    for (const message of pending) {
+      taintTracker.taintText(message, 'ipc_message');
+    }
     prompt += '\n' + pending.join('\n');
   }
 
@@ -511,7 +629,15 @@ async function main(): Promise<void> {
     while (true) {
       log(`Starting query (session: ${sessionId || 'new'}, resumeAt: ${resumeAt || 'latest'})...`);
 
-      const queryResult = await runQuery(prompt, sessionId, mcpServerPath, containerInput, sdkEnv, resumeAt);
+      const queryResult = await runQuery(
+        prompt,
+        sessionId,
+        mcpServerPath,
+        containerInput,
+        sdkEnv,
+        taintTracker,
+        resumeAt,
+      );
       if (queryResult.newSessionId) {
         sessionId = queryResult.newSessionId;
       }
@@ -540,6 +666,7 @@ async function main(): Promise<void> {
       }
 
       log(`Got new message (${nextMessage.length} chars), starting new query`);
+      taintTracker.taintText(nextMessage, 'ipc_message');
       prompt = nextMessage;
     }
   } catch (err) {

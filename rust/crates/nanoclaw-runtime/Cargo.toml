@@ -1,0 +1,14 @@
+[package]
+name = "nanoclaw-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+nanoclaw-core = { path = "../nanoclaw-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

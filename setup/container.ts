@@ -96,7 +96,9 @@ export async function run(args: string[]): Promise<void> {
   }
 
   const buildCmd =
-    runtime === 'apple-container' ? 'container build' : 'docker build';
+    runtime === 'apple-container'
+      ? 'container build'
+      : 'docker build --network=host';
   const runCmd = runtime === 'apple-container' ? 'container' : 'docker';
 
   // Build
